@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- 第一行：本机 IP + 刷新 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="本机 IP"
+            android:textSize="13sp"
+            android:textColor="#666666" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="4dp">
+
+            <TextView
+                android:id="@+id/tvIp"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="获取中…"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnRefreshIp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="刷新" />
+        </LinearLayout>
+
+        <!-- 第二行：服务器类型 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="服务器类型"
+            android:textSize="13sp"
+            android:textColor="#666666"
+            android:layout_marginTop="16dp" />
+
+        <Spinner
+            android:id="@+id/spinnerType"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" />
+
+        <!-- 第三行：端口 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="端口"
+            android:textSize="13sp"
+            android:textColor="#666666"
+            android:layout_marginTop="16dp" />
+
+        <EditText
+            android:id="@+id/etPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:text="8888"
+            android:maxLines="1"
+            android:layout_marginTop="4dp" />
+
+        <!-- 第四行：共享目录 -->
+        <Button
+            android:id="@+id/btnPickDir"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="选择目录"
+            android:layout_marginTop="16dp" />
+
+        <TextView
+            android:id="@+id/tvDir"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:text="未选择目录"
+            android:textSize="14sp"
+            android:layout_marginTop="4dp"
+            android:textIsSelectable="true" />
+
+        <!-- 显示隐藏文件开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="显示隐藏文件（名称以 . 开头）"
+                android:textSize="14sp" />
+
+            <Switch
+                android:id="@+id/swHidden"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- 第五行：启动服务 + 访问地址 -->
+        <Button
+            android:id="@+id/btnStart"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="启动服务"
+            android:layout_marginTop="16dp" />
+
+        <TextView
+            android:id="@+id/tvUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:text=""
+            android:textSize="14sp"
+            android:textIsSelectable="true"
+            android:layout_marginTop="4dp" />
+
+        <!-- 第六行：二维码 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="访问地址二维码"
+            android:textSize="13sp"
+            android:textColor="#666666"
+            android:layout_marginTop="16dp" />
+
+        <ImageView
+            android:id="@+id/ivQr"
+            android:layout_width="220dp"
+            android:layout_height="220dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>
