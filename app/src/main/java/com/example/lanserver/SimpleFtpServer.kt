@@ -18,7 +18,8 @@ class SimpleFtpServer(
     private val ctx: Context,
     private val root: DocumentFile,
     private val port: Int,
-    private val showHidden: Boolean
+    private val showHidden: Boolean,
+    private val allowWrite: Boolean = false
 ) : Thread() {
 
     @Volatile
@@ -35,7 +36,7 @@ class SimpleFtpServer(
                     sock.close()
                     break
                 }
-                ClientConnection(ctx, sock, root, showHidden).start()
+                ClientConnection(ctx, sock, root, showHidden, allowWrite).start()
             }
         } catch (e: Exception) {
             running = false
@@ -50,7 +51,13 @@ class SimpleFtpServer(
         }
     }
 
-    private class ClientConnection(val ctx: Context, val sock: Socket, val root: DocumentFile, val showHidden: Boolean) : Thread() {
+    private class ClientConnection(
+        val ctx: Context,
+        val sock: Socket,
+        val root: DocumentFile,
+        val showHidden: Boolean,
+        val allowWrite: Boolean
+    ) : Thread() {
         private val reader = BufferedReader(InputStreamReader(sock.getInputStream()))
         private val writer = PrintWriter(OutputStreamWriter(sock.getOutputStream()), true)
         private var cwd: DocumentFile = root
@@ -112,9 +119,10 @@ class SimpleFtpServer(
                 "PORT" -> openPort(arg)
                 "LIST", "NLST" -> listDir(arg)
                 "RETR" -> retrieve(arg)
-                "STOR" -> store(arg)
-                "MKD", "XMKD" -> send("257 目录已创建。")
-                "RMD" -> send("250 目录已删除。")
+                "STOR" -> if (allowWrite) store(arg) else send("550 写入已禁用。")
+                "MKD", "XMKD" -> if (allowWrite) makeDir(arg) else send("550 写入已禁用。")
+                "RMD" -> if (allowWrite) removeDir(arg) else send("550 写入已禁用。")
+                "DELE" -> if (allowWrite) deleteFile(arg) else send("550 写入已禁用。")
                 "QUIT" -> {
                     send("221 再见。")
                     return false
@@ -276,6 +284,46 @@ class SimpleFtpServer(
                 }
             }
             send("226 传输完成。")
+        }
+
+        private fun makeDir(arg: String) {
+            val name = arg.trimStart('/').substringAfterLast('/')
+            if (name.isEmpty()) {
+                send("550 目录名无效。")
+                return
+            }
+            val target = cwd.findFile(name) ?: cwd.createDirectory(name)
+            if (target != null && target.isDirectory) {
+                send("257 \"$name\" 目录已创建。")
+            } else {
+                send("550 无法创建目录。")
+            }
+        }
+
+        private fun removeDir(arg: String) {
+            val target = resolveRel(arg)
+            if (target == null || !target.first.isDirectory) {
+                send("550 目录不存在。")
+                return
+            }
+            if (target.first.delete()) {
+                send("250 目录已删除。")
+            } else {
+                send("550 无法删除目录。")
+            }
+        }
+
+        private fun deleteFile(arg: String) {
+            val f = DocUtils.resolve(cwd, arg)
+            if (f == null || !f.isFile) {
+                send("550 文件不存在。")
+                return
+            }
+            if (f.delete()) {
+                send("250 文件已删除。")
+            } else {
+                send("550 无法删除文件。")
+            }
         }
 
         private fun send(msg: String) {
