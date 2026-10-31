@@ -10,6 +10,10 @@ import java.net.URLDecoder
 /**
  * 轻量 HTTP 文件服务器（HTTP/1.0，单连接串行处理）。
  * 基于 SAF 选中的 DocumentFile 根目录，支持目录浏览与文件下载。
+ *
+ * 目录列举已改为单次批量查询（见 DocUtils.listEntries），解决了此前逐文件
+ * 跨进程查询导致的极慢问题（1200 文件曾耗时 130+ 秒）。
+ * 后续仍可优化的方向：并发处理（当前每连接起一个线程）、大文件分块传输。
  */
 class SimpleHttpServer(
     private val ctx: Context,
@@ -118,9 +122,10 @@ class SimpleHttpServer(
 
                 val file = DocUtils.resolve(root, decoded)
                 when {
-                    file == null || !file.exists() -> send(out, 404, "text/plain; charset=utf-8", "404 Not Found")
-                    file.isDirectory -> send(out, 200, "text/html; charset=utf-8", buildListing(decoded, file))
-                    else -> {
+                    file != null && file.exists() && file.isDirectory ->
+                        send(out, 200, "text/html; charset=utf-8", buildListing(decoded, file))
+                    file != null && file.exists() -> {
+                        // 存在的文件：直接下载
                         val mime = DocUtils.mimeOf(file.name ?: "")
                         val header = "HTTP/1.1 200 OK\r\n" +
                                 "Content-Type: $mime\r\n" +
@@ -128,6 +133,11 @@ class SimpleHttpServer(
                                 "Connection: close\r\n\r\n"
                         out.write(header.toByteArray(Charsets.UTF_8))
                         ctx.contentResolver.openInputStream(file.uri)?.use { it.copyTo(out) }
+                    }
+                    else -> {
+                        // 路径不存在：逐级向上找最近的、真实存在的目录并跳转
+                        val target = nearestExistingDir(decoded)
+                        sendRedirect(out, if (target == "/") "/" else "$target/")
                     }
                 }
             } catch (e: Exception) {
@@ -238,6 +248,22 @@ class SimpleHttpServer(
             return -1
         }
 
+        /**
+         * 路径不存在时，从请求路径逐级向上查找最近的、真实存在的目录，
+         * 用于把无效路径重定向到最近的有效目录（例如 /A/B 不存在 → /A，再不行 → 根目录 /）。
+         */
+        private fun nearestExistingDir(path: String): String {
+            var cur = path.trimEnd('/')
+            if (cur.isEmpty()) cur = "/"
+            while (true) {
+                val f = DocUtils.resolve(root, cur)
+                if (f != null && f.exists() && f.isDirectory) return cur
+                if (cur == "/") return "/"
+                val slash = cur.lastIndexOf('/')
+                cur = if (slash <= 0) "/" else cur.substring(0, slash)
+            }
+        }
+
         private fun sendRedirect(out: java.io.OutputStream, location: String) {
             val body = "<html><body>上传成功，<a href=\"${escapeHtml(location)}\">返回</a></body></html>"
             val bytes = body.toByteArray(Charsets.UTF_8)
@@ -265,16 +291,18 @@ class SimpleHttpServer(
 
         private fun buildListing(curPath: String, dir: DocumentFile): String {
             val sb = StringBuilder()
-            sb.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>局域网服务器</title>")
+            sb.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+            sb.append("<title>局域网服务器</title>")
             sb.append("<style>body{font-family:system-ui,-apple-system,sans-serif;background:#f2f5f9;color:#1b2430;margin:0;padding:16px}")
-            sb.append(".card{background:#fff;border:1px solid #e4e9f0;border-radius:14px;padding:12px;margin-bottom:10px}")
-            sb.append(".head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}")
-            sb.append("h3{margin:0;font-size:16px;font-weight:600}")
-            sb.append(".btn{background:#0ea5e9;color:#fff;border:0;border-radius:9px;padding:6px 12px;font-size:12px;font-weight:600}")
+            sb.append(".card{background:#fff;border:1px solid #e4e9f0;border-radius:14px;padding:14px;margin-bottom:10px}")
+            sb.append(".head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}")
+            sb.append("h3{margin:0;font-size:18px;font-weight:600}")
+            sb.append(".btn{background:#0ea5e9;color:#fff;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:600}")
             sb.append(".btn:disabled{background:#9aa8b8}")
             sb.append("ul{list-style:none;padding:0;margin:8px 0 0}")
-            sb.append("li{padding:8px 0;border-top:1px solid #e4e9f0}")
-            sb.append("a{color:#0ea5e9;text-decoration:none;font-size:14px}")
+            sb.append("li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #e4e9f0}")
+            sb.append("a{color:#0ea5e9;text-decoration:none;font-size:17px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}")
+            sb.append(".size{color:#9aa8b8;font-size:13px;white-space:nowrap}")
             sb.append("</style></head><body>")
             sb.append("<div class=\"card\">")
             sb.append("<div class=\"head\"><h3>目录: ").append(escapeHtml(curPath)).append("</h3>")
@@ -289,23 +317,47 @@ class SimpleHttpServer(
             sb.append("<ul>")
             // 父目录链接（根目录不显示）
             if (curPath != "/" && curPath.isNotEmpty()) {
-                val parent = curPath.substringBeforeLast('/', "/")
-                val parentLink = if (parent == "/") "/" else "$parent/"
+                // 注意：目录 URL 可能带结尾斜杠（如 /A/B/），必须先去尾斜杠再取父级，
+                // 否则 substringBeforeLast 会算回它自己，导致点击 ../ 原地打转。
+                val normalized = curPath.trimEnd('/')
+                val slash = normalized.lastIndexOf('/')
+                val parentLink = if (slash <= 0) "/" else normalized.substring(0, slash) + "/"
                 sb.append("<li><a href=\"").append(parentLink).append("\">../</a></li>")
             }
             // 关键点：使用“完整路径”的绝对链接（UTF-8 编码），
             // 否则浏览器会基于“当前目录”做相对解析，
             // 在目录 URL 没有结尾斜杠时把子文件夹一级丢掉（中文/英文子目录都受影响）。
             val base = if (curPath == "/") "/" else "$curPath/"
-            for (f in DocUtils.listChildren(dir, showHidden)) {
-                val name = f.name ?: "?"
+            // 一次批量查询取回全部子项的名称/类型/大小，避免对每个文件逐一触发跨进程查询
+            for (e in DocUtils.listEntries(ctx, root, dir, showHidden)) {
+                val name = e.name
                 val enc = java.net.URLEncoder.encode(name, "UTF-8")
                 val link = "$base$enc"
+                // 文件显示大小并右对齐；文件夹显示内部项数（是否统计隐藏与 UI 同步）
+                val sizeText = if (e.isDirectory) {
+                    val n = DocUtils.countChildren(ctx, root, e.uri, showHidden)
+                    "<span class=\"size\">${n} 项</span>"
+                } else {
+                    "<span class=\"size\">${formatSize(e.size)}</span>"
+                }
                 sb.append("<li><a href=\"").append(link).append("\">")
-                    .append(escapeHtml(name)).append(if (f.isDirectory) "/" else "").append("</a></li>")
+                    .append(escapeHtml(name)).append(if (e.isDirectory) "/" else "").append("</a>")
+                    .append(sizeText).append("</li>")
             }
             sb.append("</ul></div></body></html>")
             return sb.toString()
+        }
+
+        /** 把字节数格式化为易读大小（B / KB / MB / GB）。 */
+        private fun formatSize(bytes: Long): String {
+            if (bytes <= 0) return "0 B"
+            if (bytes < 1024) return "$bytes B"
+            val kb = bytes / 1024.0
+            if (kb < 1024) return String.format(java.util.Locale.US, "%.1f KB", kb)
+            val mb = kb / 1024
+            if (mb < 1024) return String.format(java.util.Locale.US, "%.1f MB", mb)
+            val gb = mb / 1024
+            return String.format(java.util.Locale.US, "%.2f GB", gb)
         }
 
         private fun escapeHtml(s: String): String {
