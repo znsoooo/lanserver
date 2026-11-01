@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 局域网服务图标：纯几何矢量版（背景 #0EA6E9 + 白色线条）。
+     路径坐标取自原图 1172x1172 实测像素，由 group 的 scale/translate 映射到 108dp 视口，
+     改图形大小只需调整 scale。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.0675768"
+        android:scaleY="0.0675768"
+        android:translateX="14.40"
+        android:translateY="14.40">
+        <path
+            android:pathData="M295,231 L865,231 Q901,231 901,267 L901,768 Q901,804 865,804 L295,804 Q259,804 259,768 L259,267 Q259,231 295,231 Z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="42"
+            android:strokeLineCap="butt"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M238,421.5 L922,421.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="44"
+            android:strokeLineCap="butt" />
+        <path
+            android:pathData="M238,613.5 L922,613.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="40"
+            android:strokeLineCap="butt" />
+        <path
+            android:pathData="M348,325.5 L555,325.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="42"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M348,516.5 L555,516.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="42"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M348,709.5 L555,709.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="42"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M580,815 L580,888"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="48"
+            android:strokeLineCap="butt" />
+        <path
+            android:pathData="M437,898 L723,898 Q727,898 727,902 L727,985 Q727,989 723,989 L437,989 Q433,989 433,985 L433,902 Q433,898 437,898 Z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="42"
+            android:strokeLineCap="butt"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M0,942 L455,942"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="38"
+            android:strokeLineCap="butt" />
+        <path
+            android:pathData="M707,942 L1172,942"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="38"
+            android:strokeLineCap="butt" />
+        <path
+            android:pathData="M755.5,325.5 A20.5,20.5 0 1,0 796.5,325.5 A20.5,20.5 0 1,0 755.5,325.5 Z"
+            android:fillColor="#FFFFFF" />
+        <path
+            android:pathData="M755.5,516.5 A20.5,20.5 0 1,0 796.5,516.5 A20.5,20.5 0 1,0 755.5,516.5 Z"
+            android:fillColor="#FFFFFF" />
+        <path
+            android:pathData="M755.5,709.5 A20.5,20.5 0 1,0 796.5,709.5 A20.5,20.5 0 1,0 755.5,709.5 Z"
+            android:fillColor="#FFFFFF" />
+    </group>
+</vector>

@@ -1,4 +1,4 @@
-package com.example.lanserver
+package com.znsoooo.lanserver
 
 import java.net.Inet4Address
 import java.net.NetworkInterface

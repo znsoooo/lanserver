@@ -1,4 +1,4 @@
-package com.example.lanserver
+package com.znsoooo.lanserver
 
 import android.content.Context
 import androidx.documentfile.provider.DocumentFile
