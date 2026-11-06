@@ -19,19 +19,6 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * FTP 服务器运行期“可热更新”的配置。
- *
- * 三个字段都用 @Volatile，且被服务器各连接**实时读取**而非构造时快照，因此：
- * 在 App 界面修改共享目录 / 读写权限 / 显示隐藏后，正在进行的 FTP 会话在下一条命令
- * 即采用新配置，无需断开重连（满足“配置实时生效，而不是记录在会话里”的要求）。
- */
-class FtpConfig(
-    @Volatile var root: DocumentFile,
-    @Volatile var showHidden: Boolean,
-    @Volatile var allowWrite: Boolean
-)
-
-/**
  * MLSD / MLST 使用的时间格式：UTC，yyyyMMddHHmmss（RFC 3659）。
  */
 private fun mlsTime(ms: Long): String {
@@ -58,7 +45,7 @@ private fun mlsTime(ms: Long): String {
 class SimpleFtpServer(
     private val ctx: Context,
     private val port: Int,
-    val config: FtpConfig
+    val config: ServerConfig
 ) : Thread() {
 
     @Volatile
@@ -78,7 +65,7 @@ class SimpleFtpServer(
                     sock.close()
                     break
                 }
-                val c = ClientConnection(ctx, sock, config) { clients.remove(it) }
+                val c = ClientConnection(ctx, sock, config, onClosed = { clients.remove(it) })
                 clients.add(c)
                 c.start()
             }
@@ -104,11 +91,17 @@ class SimpleFtpServer(
     }
 
     // ---------------------------------------------------------------------
-    private class ClientConnection(
+    /**
+     * 单个 FTP 控制连接。
+     * 由 [LanServer] 在分流后创建（因此不再是 private）；[prefetched] 是协议判别时
+     * 已经读出的第一行，避免重复读取导致首条命令丢失。
+     */
+    class ClientConnection(
         val ctx: Context,
         val sock: Socket,
-        val config: FtpConfig,
-        val onClosed: (ClientConnection) -> Unit = {}
+        val config: ServerConfig,
+        val onClosed: (ClientConnection) -> Unit = {},
+        private var prefetched: ByteArray? = null
     ) : Thread() {
 
         private val rawInput = sock.getInputStream()
@@ -292,12 +285,32 @@ class SimpleFtpServer(
             return cur
         }
 
-        /** 查找子项：先用 DocumentFile.findFile，失败再遍历 listFiles，尽量避开 provider 差异。 */
+        /**
+         * 查找子项。
+         *
+         * 注意：**不再以 DocumentFile.findFile() 为主**。实测部分 ROM 的 findFile 不可靠——
+         * 连刚创建的文件都会返回 null（日志里同一次连接反复 createFile 生成了 33 个副本即是证据），
+         * 在“子项与父目录同名”（如 /lanserver.git/lanserver.git）时还可能返回错误对象，
+         * 导致 RETR 判定成“不是文件”而回 550。
+         *
+         * 改为：一次批量查询取回本目录全部子项，再按 displayName 精确匹配；findFile/listFiles 仅兜底。
+         * 这样每个路径段只多一次 IPC（与列目录同源），并天然避开同名歧义。
+         */
         private fun findChild(dir: DocumentFile, name: String): DocumentFile? {
+            // 快路径：findFile 若能返回“名字确实匹配”的对象，说明没有同名歧义，直接用。
             try {
-                dir.findFile(name)?.let { return it }
+                val f = dir.findFile(name)
+                if (f != null && f.name == name) return f
             } catch (e: Exception) {
             }
+            // 慢路径：一次批量查询后精确匹配（findFile 可能返回错误对象，如同名嵌套时返回父目录）
+            try {
+                val hit = DocUtils.listEntries(ctx, config.root, dir, true)
+                    .firstOrNull { it.name == name }
+                if (hit != null) return DocumentFile.fromSingleUri(ctx, hit.uri)
+            } catch (e: Exception) {
+            }
+            // 最后兜底：遍历匹配（listFiles 的结果带真实名字，不存在同名歧义）
             return try {
                 dir.listFiles().firstOrNull { it.name == name }
             } catch (e: Exception) {
@@ -369,8 +382,9 @@ class SimpleFtpServer(
                 return
             }
             val r = resolvePath(arg)
-            if (r != null && r.file.isDirectory) {
-                cwd = r.file
+            val isDir = r != null && r.file.isDirectory
+            if (isDir) {
+                cwd = r!!.file
                 cwdRel = r.rel
                 send("250 CWD command successful.")
             } else {
@@ -707,17 +721,35 @@ class SimpleFtpServer(
                 return
             }
             send("150 Opening BINARY mode data connection.")
+            var sent = 0L
+            var err: String? = null
             try {
-                ctx.contentResolver.openInputStream(f.uri)?.use { input ->
-                    if (restOffset > 0) skipFully(input, restOffset)
-                    ds.getOutputStream().use { out -> input.copyTo(out) }
+                val input = ctx.contentResolver.openInputStream(f.uri)
+                if (input == null) {
+                    err = "openInputStream returned null"
+                } else {
+                    input.use { ins ->
+                        if (restOffset > 0) skipFully(ins, restOffset)
+                        ds.getOutputStream().use { out ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = ins.read(buf)
+                                if (n < 0) break
+                                out.write(buf, 0, n)
+                                sent += n
+                            }
+                            out.flush()
+                        }
+                    }
                 }
             } catch (e: Exception) {
+                err = e.toString()
             } finally {
                 restOffset = 0
                 closeQuietly(ds)
             }
-            send("226 Transfer complete.")
+            if (err == null) send("226 Transfer complete.")
+            else send("451 Transfer aborted: $err")
         }
 
         private fun store(arg: String, append: Boolean) {
@@ -769,6 +801,11 @@ class SimpleFtpServer(
         // ------------------------------------------------------------------
         /** 按字节读取一行（CRLF 结尾），不做任何编码转换。 */
         private fun readCommandLine(): ByteArray? {
+            // 协议分流时已读出的首行（如 "USER anonymous"）优先返回
+            prefetched?.let {
+                prefetched = null
+                return it
+            }
             val buf = ByteArrayOutputStream(256)
             var prev = -1
             while (true) {
@@ -813,6 +850,14 @@ class SimpleFtpServer(
             } catch (e: Exception) {
             }
         }
+
+        /**
+         * 临时诊断：把命令序列与关键解析结果追加到共享目录根下的 _ftp_debug.log。
+         * 仅用于定位“同名文件下载失败”，问题确认后可整段删除。
+         *
+         * 文件句柄只解析一次并缓存：findFile 不可靠，若每次都查找会不断 createFile，
+         * 生成 "_ftp_debug.log (1)…(32)" 一堆副本（上一轮日志就是这样丢的）。
+         */
 
         private fun cleanup() {
             closeQuietly(pasvSocket)

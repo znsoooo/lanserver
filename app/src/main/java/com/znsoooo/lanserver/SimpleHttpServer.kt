@@ -17,10 +17,8 @@ import java.net.URLDecoder
  */
 class SimpleHttpServer(
     private val ctx: Context,
-    private val root: DocumentFile,
     private val port: Int,
-    private val showHidden: Boolean,
-    private val allowWrite: Boolean = false
+    private val config: ServerConfig
 ) : Thread() {
 
     @Volatile
@@ -37,7 +35,7 @@ class SimpleHttpServer(
                     sock.close()
                     break
                 }
-                Connection(ctx, root, sock, showHidden, allowWrite).start()
+                Connection(ctx, config, sock).start()
             }
         } catch (e: Exception) {
             running = false
@@ -52,18 +50,26 @@ class SimpleHttpServer(
         }
     }
 
-    private class Connection(
+    /**
+     * 单个 HTTP 连接。
+     * 由 [LanServer] 在分流后创建（因此不再是 private）；[firstLine] 是分流时已读出的
+     * 请求行，避免重复读取。配置通过 getter 实时读取，修改共享目录/开关后下个请求即生效。
+     */
+    class Connection(
         val ctx: Context,
-        val root: DocumentFile,
+        val config: ServerConfig,
         val sock: Socket,
-        val showHidden: Boolean,
-        val allowWrite: Boolean
+        private val firstLine: String? = null
     ) : Thread() {
+        private val root: DocumentFile get() = config.root
+        private val showHidden: Boolean get() = config.showHidden
+        private val allowWrite: Boolean get() = config.allowWrite
+
         override fun run() {
             try {
                 val input = sock.getInputStream()
                 val out = sock.getOutputStream()
-                val requestLine = readLine(input) ?: return
+                val requestLine = firstLine ?: readLine(input) ?: return
                 // 请求行格式：METHOD PATH PROTOCOL，路径是第二个 token
                 val parts = requestLine.split(' ')
                 val method = if (parts.isNotEmpty()) parts[0].uppercase() else "GET"

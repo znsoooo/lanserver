@@ -66,10 +66,10 @@ class MainActivity : Activity() {
         private var sType = "HTTP"
 
         /**
-         * FTP 运行期配置（可热更新）。FTP 模式启动时创建，供界面改动“共享目录/读写/显示隐藏”
-         * 时**就地上报**到正在运行的服务器；HTTP 模式下为 null。
+         * 运行期配置（HTTP 与 FTP 共用同一份，可热更新）。服务启动时创建，
+         * 界面改动“共享目录 / 读写 / 显示隐藏”时就地上报给已建立的连接。
          */
-        @Volatile private var ftpConfig: FtpConfig? = null
+        @Volatile private var serverConfig: ServerConfig? = null
     }
 
     // 网络变化监听：IP 改变时自动刷新地址与二维码
@@ -209,9 +209,8 @@ class MainActivity : Activity() {
     }
 
     private fun selectType(type: String) {
+        // 单端口双协议：切换仅影响界面展示的地址（ftp:// 或 http://），服务无需重启
         applyTypeUI(type)
-        // 类型切换会切换协议，运行中需重启服务
-        restartIfRunning(silent = true)
     }
 
     private fun refreshIp() {
@@ -268,35 +267,28 @@ class MainActivity : Activity() {
             return
         }
         val port = getPort()
-        val type = selectedType
         val showHidden = swHidden.isChecked
         val allowWrite = swWrite.isChecked
         // 使用 ApplicationContext，使服务在 Activity 销毁后仍能访问 ContentResolver
         val appCtx = applicationContext
-        ftpConfig = null
-        server = if (type == "FTP") {
-            // FTP 用可变配置对象承载 root/隐藏/读写，便于运行期热更新
-            val cfg = FtpConfig(root, showHidden, allowWrite)
-            ftpConfig = cfg
-            SimpleFtpServer(appCtx, port, cfg)
-        } else {
-            SimpleHttpServer(appCtx, root, port, showHidden, allowWrite)
-        }
-        sType = type
+        // 单端口双协议：同一个监听同时接受 HTTP 与 FTP，按首行自动分流
+        val cfg = ServerConfig(root, showHidden, allowWrite)
+        serverConfig = cfg
+        server = LanServer(appCtx, port, cfg)
+        sType = selectedType
         server!!.start()
         running = true
         updateUrl()
         setRunningUi(true)
         if (showToast) {
-            Toast.makeText(this, "$type 服务已启动（端口 $port）", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "服务已启动（端口 $port）", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun stopServer() {
-        (server as? SimpleHttpServer)?.stopServer()
-        (server as? SimpleFtpServer)?.stopServer()
+        (server as? LanServer)?.stopServer()
         server = null
-        ftpConfig = null
+        serverConfig = null
         running = false
         setRunningUi(false)
     }
@@ -309,21 +301,17 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 配置变化的分发：
-     *  - FTP 正在运行：**就地热更新**共享目录 / 读写 / 显示隐藏（不断开连接），
-     *    客户端下一条命令（如 LIST）即采用新配置；
-     *  - 其它情况（HTTP 模式、或服务未运行）：按需重启。
-     * 端口、协议类型的变化仍走 restartIfRunning（监听端口/协议必须重建）。
+     * 配置变化：**就地热更新**共享目录 / 读写 / 显示隐藏（HTTP 与 FTP 共用同一份配置）。
+     * 已建立的连接在下一条请求或命令上即采用新值，不需要重启、不断开。
+     * （只有端口变化才需要重启监听。）
      */
     private fun applyConfigChange() {
-        val cfg = ftpConfig
-        if (running && selectedType == "FTP" && cfg != null && server is SimpleFtpServer) {
+        val cfg = serverConfig
+        if (running && cfg != null) {
             val root = DocumentFile.fromTreeUri(this, pickedTreeUri!!)
             if (root != null && root.exists()) cfg.root = root
             cfg.showHidden = swHidden.isChecked
             cfg.allowWrite = swWrite.isChecked
-        } else {
-            restartIfRunning(silent = true)
         }
     }
 
