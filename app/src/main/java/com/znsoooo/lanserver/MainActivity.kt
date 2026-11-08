@@ -10,9 +10,13 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -20,7 +24,7 @@ import android.widget.TextView
 import android.widget.ImageView
 import android.widget.Switch
 import android.widget.Toast
-import androidx.documentfile.provider.DocumentFile
+import java.io.File
 
 class MainActivity : Activity() {
 
@@ -39,7 +43,7 @@ class MainActivity : Activity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvTitle: TextView
 
-    private var pickedTreeUri: Uri? = null
+    private var rootDir: File = FileStore.primaryRoot()
     private var selectedType = "HTTP"
 
     /**
@@ -50,10 +54,8 @@ class MainActivity : Activity() {
      */
     private var initializing = true
 
-    // 默认共享目录：内部存储根 /storage/emulated/0
-    private val defaultTreeUri: Uri =
-        DocumentsContract.buildTreeDocumentUri("com.android.externalstorage.documents", "primary:")
-    private val defaultDirText = "/storage/emulated/0"
+    /** 缺少存储权限时，授权返回后是否要自动启动服务。 */
+    private var pendingStartAfterPermission = false
 
     private val prefsName = "lanserver_prefs"
 
@@ -61,6 +63,7 @@ class MainActivity : Activity() {
     // 跨配置变更复用同一实例，避免重复占用端口。
     companion object {
         private const val REQ_PICK_DIR = 1
+        private const val REQ_STORAGE = 2
         @Volatile private var server: Thread? = null
         @Volatile private var running = false
         private var sType = "HTTP"
@@ -91,6 +94,9 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 供 FileStore 在无 Context 的路径解析里按需刷新收藏列表（虚拟 @Favorite）
+        FileStore.init(applicationContext)
+
         tvIp = findViewById(R.id.tvIp)
         chipHttp = findViewById(R.id.chipHttp)
         chipFtp = findViewById(R.id.chipFtp)
@@ -113,10 +119,9 @@ class MainActivity : Activity() {
         val savedPort = sp.getString("port", "8888") ?: "8888"
         val savedWrite = sp.getBoolean("write", false)
         val savedHidden = sp.getBoolean("hidden", false)
-        val savedUri = sp.getString("dir_uri", "") ?: ""
-        pickedTreeUri = if (savedUri.isNotEmpty()) Uri.parse(savedUri) else defaultTreeUri
-        tvDir.text = if (pickedTreeUri == defaultTreeUri) defaultDirText
-        else DocUtils.friendlyPath(pickedTreeUri!!)
+        val savedPath = sp.getString("root_path", "") ?: ""
+        rootDir = if (savedPath.isNotEmpty()) File(savedPath) else FileStore.primaryRoot()
+        tvDir.text = rootDir.absolutePath
 
         refreshIp()
         findViewById<TextView>(R.id.btnPickDir).setOnClickListener { pickDir() }
@@ -183,13 +188,15 @@ class MainActivity : Activity() {
             }
         }
 
-        // 应用打开后默认启动服务；若启动过程抛异常（如端口占用），则保持关闭状态
-        if (!running) {
-            try {
-                startServer(showToast = false)
-            } catch (e: Exception) {
-                setRunningUi(false)
-                Toast.makeText(this, "服务启动失败：${e.message}", Toast.LENGTH_SHORT).show()
+        // 应用打开后默认启动服务（先确保存储权限，否则 File 读写会失败）
+        ensureStoragePermission {
+            if (!running) {
+                try {
+                    startServer(showToast = false)
+                } catch (e: Exception) {
+                    setRunningUi(false)
+                    Toast.makeText(this, "服务启动失败：${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
 
@@ -218,36 +225,111 @@ class MainActivity : Activity() {
         updateUrl()
     }
 
-    private fun pickDir() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+    // ------------------------------------------------------------------
+    // 存储权限：Android 11+ 用「所有文件访问」（MANAGE_EXTERNAL_STORAGE），
+    // 这样才能用 java.io.File 直接访问 /storage/emulated/0 及其子目录。
+    // 更低版本走传统 READ/WRITE_EXTERNAL_STORAGE 运行时权限。
+    // ------------------------------------------------------------------
+    private fun hasStoragePermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+        else if (Build.VERSION.SDK_INT >= 23)
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        else true
+
+    private fun ensureStoragePermission(then: () -> Unit) {
+        if (hasStoragePermission()) {
+            then()
+            return
         }
-        startActivityForResult(intent, REQ_PICK_DIR)
+        pendingStartAfterPermission = true
+        if (Build.VERSION.SDK_INT >= 30) {
+            Toast.makeText(this, "请允许「所有文件访问」，以便读取手机根目录", Toast.LENGTH_LONG).show()
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (e: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (e2: Exception) {
+                }
+            }
+        } else if (Build.VERSION.SDK_INT >= 23) {
+            requestPermissions(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ),
+                REQ_STORAGE
+            )
+        } else {
+            then()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从「所有文件访问」设置页返回后继续启动服务
+        if (pendingStartAfterPermission && hasStoragePermission()) {
+            pendingStartAfterPermission = false
+            if (!running) {
+                try {
+                    startServer(showToast = false)
+                } catch (e: Exception) {
+                    setRunningUi(false)
+                }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_STORAGE) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (pendingStartAfterPermission) {
+                    pendingStartAfterPermission = false
+                    if (!running) {
+                        try {
+                            startServer(showToast = false)
+                        } catch (e: Exception) {
+                            setRunningUi(false)
+                        }
+                    }
+                }
+            } else {
+                Toast.makeText(this, "未授予存储权限，无法读取共享目录", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * 自建文件夹选择器：SAF 的 ACTION_OPEN_DOCUMENT_TREE 不允许选存储根
+     * （部分 ROM 连 Download 也拦），所以改为自己遍历文件系统。
+     */
+    private fun pickDir() {
+        ensureStoragePermission {
+            val intent = Intent(this, DirPickerActivity::class.java)
+                .putExtra(DirPickerActivity.EXTRA_START, rootDir.absolutePath)
+            startActivityForResult(intent, REQ_PICK_DIR)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_PICK_DIR && resultCode == Activity.RESULT_OK) {
-            val uri = data?.data
-            if (uri != null) {
-                try {
-                    contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    )
-                } catch (e: Exception) {
-                    // 部分机型不支持持久化，忽略
-                }
-                pickedTreeUri = uri
-                tvDir.text = DocUtils.friendlyPath(uri)
-                // 共享目录变化：FTP 运行中就地热更新，其它情况重启服务
-                applyConfigChange()
-                saveState()
-            }
+            val path = data?.getStringExtra(DirPickerActivity.EXTRA_PATH) ?: return
+            rootDir = File(path)
+            tvDir.text = rootDir.absolutePath
+            // 共享目录变化：服务运行中就地热更新（含 @Favorite 的启用判断）
+            applyConfigChange()
+            saveState()
         }
     }
 
@@ -257,15 +339,22 @@ class MainActivity : Activity() {
     }
 
     private fun toggleServer() {
-        if (running) stopServer() else startServer(showToast = true)
+        if (running) {
+            stopServer()
+            return
+        }
+        // 首次使用会跳系统设置授权「所有文件访问」，返回后自动启动
+        ensureStoragePermission { startServer(showToast = true) }
     }
 
     private fun startServer(showToast: Boolean) {
-        val root = DocumentFile.fromTreeUri(this, pickedTreeUri!!)
-        if (root == null || !root.exists()) {
+        val root = rootDir
+        if (!root.exists() || !root.isDirectory) {
             Toast.makeText(this, "共享目录不可用，请重新选择", Toast.LENGTH_SHORT).show()
             return
         }
+        FileStore.init(applicationContext)
+        FileStore.refreshFavorites(this, root, force = true)
         val port = getPort()
         val showHidden = swHidden.isChecked
         val allowWrite = swWrite.isChecked
@@ -308,8 +397,10 @@ class MainActivity : Activity() {
     private fun applyConfigChange() {
         val cfg = serverConfig
         if (running && cfg != null) {
-            val root = DocumentFile.fromTreeUri(this, pickedTreeUri!!)
-            if (root != null && root.exists()) cfg.root = root
+            if (rootDir.exists() && rootDir.isDirectory) {
+                cfg.root = rootDir
+                FileStore.refreshFavorites(this, rootDir, force = true)
+            }
             cfg.showHidden = swHidden.isChecked
             cfg.allowWrite = swWrite.isChecked
         }
@@ -352,7 +443,7 @@ class MainActivity : Activity() {
             putString("port", etPort.text.toString())
             putBoolean("write", swWrite.isChecked)
             putBoolean("hidden", swHidden.isChecked)
-            putString("dir_uri", pickedTreeUri?.toString() ?: "")
+            putString("root_path", rootDir.absolutePath)
             apply()
         }
     }

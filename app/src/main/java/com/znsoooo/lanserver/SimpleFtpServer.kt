@@ -1,9 +1,8 @@
 package com.znsoooo.lanserver
 
 import android.content.Context
-import android.os.Build
-import android.provider.DocumentsContract
-import androidx.documentfile.provider.DocumentFile
+import java.io.File
+import java.io.FileOutputStream
 import java.io.BufferedWriter
 import java.io.ByteArrayOutputStream
 import java.io.OutputStreamWriter
@@ -113,10 +112,10 @@ class SimpleFtpServer(
          */
         private var liveCharset: Charset = gb()
 
-        private var cwd: DocumentFile = config.root
+        private var cwd: File = config.root
         private var cwdRel = "/"
         /** 记录 cwd 所属的根，用于检测“共享目录被热更新”并重新锚定。 */
-        private var cwdRoot: DocumentFile = config.root
+        private var cwdRoot: File = config.root
 
         private var pasvSocket: ServerSocket? = null
         private var portSocket: Socket? = null
@@ -237,11 +236,11 @@ class SimpleFtpServer(
         // ------------------------------------------------------------------
         // 路径解析（RFC 959：参数以 “/” 开头为绝对路径，否则相对当前目录）
         // ------------------------------------------------------------------
-        private class Resolved(val file: DocumentFile, val rel: String)
+        private class Resolved(val file: File, val rel: String)
 
         private fun resolvePath(arg: String): Resolved? {
             val a = arg.trim()
-            var cur: DocumentFile
+            var cur: File
             var rel: String
             val rest: String
             if (a.startsWith("/")) {
@@ -265,7 +264,7 @@ class SimpleFtpServer(
                         }
                     }
                     else -> {
-                        val next = findChild(cur, seg) ?: return null
+                        val next = FileStore.child(config.root, cur, seg) ?: return null
                         rel = if (rel == "/") "/$seg" else "$rel/$seg"
                         cur = next
                     }
@@ -275,48 +274,8 @@ class SimpleFtpServer(
         }
 
         /** 从根按规范化相对路径解析（用于 “..” 与根变更后重锚）。 */
-        private fun resolveAbsolute(rel: String): DocumentFile? {
-            if (rel == "/" || rel.isEmpty()) return config.root
-            var cur = config.root
-            for (seg in rel.trimStart('/').split('/')) {
-                if (seg.isEmpty() || seg == "." || seg == "..") continue
-                cur = findChild(cur, seg) ?: return null
-            }
-            return cur
-        }
-
-        /**
-         * 查找子项。
-         *
-         * 注意：**不再以 DocumentFile.findFile() 为主**。实测部分 ROM 的 findFile 不可靠——
-         * 连刚创建的文件都会返回 null（日志里同一次连接反复 createFile 生成了 33 个副本即是证据），
-         * 在“子项与父目录同名”（如 /lanserver.git/lanserver.git）时还可能返回错误对象，
-         * 导致 RETR 判定成“不是文件”而回 550。
-         *
-         * 改为：一次批量查询取回本目录全部子项，再按 displayName 精确匹配；findFile/listFiles 仅兜底。
-         * 这样每个路径段只多一次 IPC（与列目录同源），并天然避开同名歧义。
-         */
-        private fun findChild(dir: DocumentFile, name: String): DocumentFile? {
-            // 快路径：findFile 若能返回“名字确实匹配”的对象，说明没有同名歧义，直接用。
-            try {
-                val f = dir.findFile(name)
-                if (f != null && f.name == name) return f
-            } catch (e: Exception) {
-            }
-            // 慢路径：一次批量查询后精确匹配（findFile 可能返回错误对象，如同名嵌套时返回父目录）
-            try {
-                val hit = DocUtils.listEntries(ctx, config.root, dir, true)
-                    .firstOrNull { it.name == name }
-                if (hit != null) return DocumentFile.fromSingleUri(ctx, hit.uri)
-            } catch (e: Exception) {
-            }
-            // 最后兜底：遍历匹配（listFiles 的结果带真实名字，不存在同名歧义）
-            return try {
-                dir.listFiles().firstOrNull { it.name == name }
-            } catch (e: Exception) {
-                null
-            }
-        }
+        private fun resolveAbsolute(rel: String): File? =
+            FileStore.resolve(config.root, rel)
 
         private fun parentRel(rel: String): String {
             if (rel == "/" || rel.isEmpty()) return "/"
@@ -330,7 +289,7 @@ class SimpleFtpServer(
             if (r === cwdRoot) return
             cwdRoot = r
             val re = if (cwdRel == "/") r else resolveAbsolute(cwdRel)
-            if (re != null && re.isDirectory) {
+            if (re != null && FileStore.isDirectory(config.root, re)) {
                 cwd = re
             } else {
                 cwd = r
@@ -339,7 +298,7 @@ class SimpleFtpServer(
         }
 
         private class CreateTarget(
-            val parent: DocumentFile,
+            val parent: File,
             val name: String,
             val fullRel: String
         )
@@ -359,7 +318,7 @@ class SimpleFtpServer(
                 idx == 0 -> "/"
                 else -> a.substring(0, idx)
             }
-            val parent: DocumentFile
+            val parent: File
             val prel: String
             if (parentPart.isEmpty()) {
                 parent = cwd
@@ -382,7 +341,7 @@ class SimpleFtpServer(
                 return
             }
             val r = resolvePath(arg)
-            val isDir = r != null && r.file.isDirectory
+            val isDir = r != null && FileStore.isDirectory(config.root, r.file)
             if (isDir) {
                 cwd = r!!.file
                 cwdRel = r.rel
@@ -409,8 +368,13 @@ class SimpleFtpServer(
                 send("550 Invalid directory name.")
                 return
             }
-            val target = findChild(t.parent, t.name) ?: t.parent.createDirectory(t.name)
-            if (target != null && target.isDirectory) {
+            if (FileStore.isInsideFavorite(config.root, t.parent)) {
+                send("550 Read-only: @Favorite is a virtual view.")
+                return
+            }
+            val target = FileStore.child(config.root, t.parent, t.name) ?: File(t.parent, t.name)
+            if (!target.exists()) target.mkdirs()
+            if (target.exists() && target.isDirectory) {
                 // RFC 959：257 "<pathname>" —— 返回绝对路径，避免客户端据此再次用相对路径解析出错
                 send("257 \"${t.fullRel}\" directory created.")
             } else {
@@ -420,8 +384,12 @@ class SimpleFtpServer(
 
         private fun removeDir(arg: String) {
             val f = resolvePath(arg)?.file
-            if (f == null || !f.isDirectory) {
+            if (f == null || !FileStore.isDirectory(config.root, f)) {
                 send("550 Directory not found.")
+                return
+            }
+            if (FileStore.isInsideFavorite(config.root, f)) {
+                send("550 Read-only: @Favorite is a virtual view.")
                 return
             }
             if (f.delete()) send("250 Directory removed.") else send("550 Cannot remove directory.")
@@ -429,7 +397,11 @@ class SimpleFtpServer(
 
         private fun doSize(arg: String) {
             val f = resolvePath(arg)?.file
-            if (f != null && f.isFile) send("213 ${f.length()}") else send("550 File not found.")
+            if (f != null && !FileStore.isDirectory(config.root, f)) {
+                send("213 ${FileStore.realFile(config.root, f).length()}")
+            } else {
+                send("550 File not found.")
+            }
         }
 
         private fun doMdtm(arg: String) {
@@ -438,7 +410,7 @@ class SimpleFtpServer(
                 send("550 File not found.")
                 return
             }
-            val t = f.lastModified()
+            val t = FileStore.realFile(config.root, f).lastModified()
             if (t > 0) send("213 ${mlsTime(t)}") else send("550 Could not get modification time.")
         }
 
@@ -454,8 +426,12 @@ class SimpleFtpServer(
 
         private fun deleteFile(arg: String) {
             val f = resolvePath(arg)?.file
-            if (f == null || !f.isFile) {
+            if (f == null || FileStore.isDirectory(config.root, f)) {
                 send("550 File not found.")
+                return
+            }
+            if (FileStore.isInsideFavorite(config.root, f)) {
+                send("550 Read-only: @Favorite is a virtual view.")
                 return
             }
             if (f.delete()) send("250 File removed.") else send("550 Cannot delete file.")
@@ -463,25 +439,28 @@ class SimpleFtpServer(
 
         // ------------------------------------------------------------------
         // 重命名 / 移动
-        //   · 同目录改名：SAF 原生 rename（DocumentsContract.renameDocument）——文件系统级，
-        //     瞬间完成、不复制数据（大文件/大文件夹也一样）。
-        //   · 跨目录移动：优先 DocumentsContract.moveDocument（API 24+）；
-        //     个别 provider 不支持时，回退为「复制到目标 + 删除源」。
+        //   java.io.File 原生 renameTo：同分区瞬间完成、不复制数据（大文件/大目录一样）。
+        //   跨分区时 renameTo 返回 false，回退为「复制到目标 + 删除源」。
+        //   Favorite 是虚拟视图，禁止任何写操作。
         // ------------------------------------------------------------------
         private fun renameFrom(arg: String) {
             val r = resolvePath(arg)
             val f = r?.file
-            if (f == null || !f.exists()) {
+            if (f == null || !FileStore.exists(config.root, f)) {
                 renameFromRel = null
                 send("550 File or directory not found.")
                 return
             }
-            if (f === config.root || r.rel == "/") {
+            if (r.rel == "/") {
                 renameFromRel = null
                 send("550 Cannot rename root directory.")
                 return
             }
-            // 记录规范化的绝对相对路径，供 RNTO 判断“同目录改名”还是“跨目录移动”
+            if (FileStore.isInsideFavorite(config.root, f)) {
+                renameFromRel = null
+                send("550 Read-only: @Favorite is a virtual view.")
+                return
+            }
             renameFromRel = r.rel
             send("350 Ready for RNTO.")
         }
@@ -494,7 +473,7 @@ class SimpleFtpServer(
                 return
             }
             val src = resolveAbsolute(fromRel)
-            if (src == null || !src.exists()) {
+            if (src == null || !FileStore.exists(config.root, src)) {
                 send("550 Source file not found.")
                 return
             }
@@ -502,65 +481,51 @@ class SimpleFtpServer(
                 send("550 Invalid target name.")
                 return
             }
-            if (findChild(t.parent, t.name) != null) {
+            if (FileStore.isInsideFavorite(config.root, t.parent)) {
+                send("550 Read-only: @Favorite is a virtual view.")
+                return
+            }
+            val dst = File(t.parent, t.name)
+            if (FileStore.child(config.root, t.parent, t.name) != null || dst.exists()) {
                 send("550 Target already exists.")
                 return
             }
-            val ok = if (parentRel(fromRel) == parentRel(t.fullRel)) {
-                // 同一目录内改名：文件系统级 rename，瞬间完成
-                runCatching {
-                    DocumentsContract.renameDocument(ctx.contentResolver, src.uri, t.name) != null
-                }.getOrDefault(false)
-            } else {
-                moveAcross(src, t)
+            // 不允许把目录移动到它自己的子目录里
+            if (src.isDirectory && dst.absolutePath.startsWith(src.absolutePath + File.separator)) {
+                send("550 Cannot move a directory into itself.")
+                return
             }
+            val ok = (src.renameTo(dst)) || fallbackMove(src, dst)
             if (ok) send("250 Rename successful.") else send("550 Rename failed.")
         }
 
-        /** 跨目录移动：优先系统 moveDocument（快、原子），不支持则回退「复制 + 删除」。 */
-        private fun moveAcross(src: DocumentFile, t: CreateTarget): Boolean {
-            if (Build.VERSION.SDK_INT >= 24) {
-                try {
-                    val srcParent = src.parentFile?.uri
-                    if (srcParent != null) {
-                        var moved = DocumentsContract.moveDocument(
-                            ctx.contentResolver, src.uri, srcParent, t.parent.uri
-                        )
-                        // moveDocument 会保留原文件名；目标名不同时再改一次名
-                        if (moved != null && src.name != t.name) {
-                            moved = DocumentsContract.renameDocument(ctx.contentResolver, moved, t.name)
-                        }
-                        if (moved != null) return true
-                    }
-                } catch (e: Exception) {
-                    // 落到下面的复制+删除兜底
-                }
-            }
-            val copied = if (src.isDirectory) copyDirInto(src, t.parent, t.name)
-            else copyFileInto(src, t.parent, t.name)
-            return copied != null && src.delete()
-        }
-
-        private fun copyFileInto(src: DocumentFile, destDir: DocumentFile, newName: String): DocumentFile? {
-            val mime = src.type ?: "application/octet-stream"
-            val dst = destDir.createFile(mime, newName) ?: return null
+        /** renameTo 失败（跨分区等）时的兜底：复制后删除。 */
+        private fun fallbackMove(src: File, dst: File): Boolean {
             return try {
-                ctx.contentResolver.openInputStream(src.uri)?.use { input ->
-                    ctx.contentResolver.openOutputStream(dst.uri)?.use { out -> input.copyTo(out) }
-                }
-                dst
+                if (src.isDirectory) copyDir(src, dst) else copyFile(src, dst)
+                src.delete()
             } catch (e: Exception) {
-                null
+                false
             }
         }
 
-        private fun copyDirInto(src: DocumentFile, destDir: DocumentFile, newName: String): DocumentFile? {
-            val dst = destDir.createDirectory(newName) ?: return null
-            for (e in DocUtils.listEntries(ctx, config.root, src, showHidden = true)) {
-                val child = findChild(src, e.name) ?: continue
-                if (e.isDirectory) copyDirInto(child, dst, e.name) else copyFileInto(child, dst, e.name)
+        private fun copyFile(src: File, dst: File): Boolean {
+            return try {
+                src.inputStream().use { input ->
+                    FileOutputStream(dst).use { out -> input.copyTo(out) }
+                }
+                true
+            } catch (e: Exception) {
+                false
             }
-            return dst
+        }
+
+        private fun copyDir(src: File, dst: File) {
+            dst.mkdirs()
+            src.listFiles()?.forEach { child ->
+                val target = File(dst, child.name)
+                if (child.isDirectory) copyDir(child, target) else copyFile(child, target)
+            }
         }
 
         // ------------------------------------------------------------------
@@ -625,7 +590,7 @@ class SimpleFtpServer(
         // 目录列举 / 文件传输
         // ------------------------------------------------------------------
         /** 解析 LIST 参数中的目标目录（可能带 -l/-a 等选项，或无参数）。 */
-        private fun targetDirOf(arg: String): DocumentFile {
+        private fun targetDirOf(arg: String): File {
             var a = arg.trim()
             if (a.startsWith("-")) {
                 val sp = a.indexOf(' ')
@@ -645,14 +610,14 @@ class SimpleFtpServer(
                 val w = BufferedWriter(OutputStreamWriter(ds.getOutputStream(), liveCharset))
                 val dir = targetDirOf(arg)
                 val fmt = SimpleDateFormat("MMM dd HH:mm", Locale.US)
-                for (e in DocUtils.listEntries(ctx, config.root, dir, config.showHidden)) {
+                for (e in FileStore.list(ctx, config.root, dir, config.showHidden)) {
                     if (namesOnly) {
                         w.write(e.name)
                         w.write("\r\n")
                     } else {
-                        val flag = if (e.isDirectory) "d" else "-"
+                        val flag = if (e.isDir) "d" else "-"
                         val date = if (e.lastModified > 0) fmt.format(Date(e.lastModified)) else "Jan 01 00:00"
-                        val size = if (e.isDirectory) 0L else e.size
+                        val size = if (e.isDir) 0L else e.size
                         w.write("$flag" + "rwxr-xr-x 1 owner group $size $date ${e.name}")
                         w.write("\r\n")
                     }
@@ -674,10 +639,10 @@ class SimpleFtpServer(
             try {
                 val w = BufferedWriter(OutputStreamWriter(ds.getOutputStream(), liveCharset))
                 val dir = targetDirOf(arg)
-                for (e in DocUtils.listEntries(ctx, config.root, dir, config.showHidden)) {
+                for (e in FileStore.list(ctx, config.root, dir, config.showHidden)) {
                     val sb = StringBuilder()
-                    sb.append("type=").append(if (e.isDirectory) "dir" else "file")
-                    if (!e.isDirectory) sb.append(";size=").append(e.size)
+                    sb.append("type=").append(if (e.isDir) "dir" else "file")
+                    if (!e.isDir) sb.append(";size=").append(e.size)
                     if (e.lastModified > 0) sb.append(";modify=").append(mlsTime(e.lastModified))
                     sb.append("; ").append(e.name)
                     w.write(sb.toString())
@@ -698,11 +663,12 @@ class SimpleFtpServer(
                 send("550 File not found.")
                 return
             }
-            val f = r.file
+            val f = FileStore.realFile(config.root, r.file)
             val name = if (r.rel == "/") "/" else r.rel.substringAfterLast('/')
             val sb = StringBuilder()
-            sb.append("type=").append(if (f.isDirectory) "dir" else "file")
-            if (!f.isDirectory) sb.append(";size=").append(f.length())
+            val isDir = FileStore.isDirectory(config.root, f)
+            sb.append("type=").append(if (isDir) "dir" else "file")
+            if (!isDir) sb.append(";size=").append(f.length())
             val t = f.lastModified()
             if (t > 0) sb.append(";modify=").append(mlsTime(t))
             send("250-Listing $name")
@@ -711,7 +677,9 @@ class SimpleFtpServer(
         }
 
         private fun retrieve(arg: String) {
-            val f = resolvePath(arg)?.file
+            val raw = resolvePath(arg)?.file
+            // @Favorite 下的文件是虚拟路径，读之前先映射回真实路径
+            val f = if (raw == null || FileStore.isDirectory(config.root, raw)) null else FileStore.realFile(config.root, raw)
             if (f == null || !f.isFile) {
                 send("550 File not found.")
                 return
@@ -724,22 +692,17 @@ class SimpleFtpServer(
             var sent = 0L
             var err: String? = null
             try {
-                val input = ctx.contentResolver.openInputStream(f.uri)
-                if (input == null) {
-                    err = "openInputStream returned null"
-                } else {
-                    input.use { ins ->
-                        if (restOffset > 0) skipFully(ins, restOffset)
-                        ds.getOutputStream().use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            while (true) {
-                                val n = ins.read(buf)
-                                if (n < 0) break
-                                out.write(buf, 0, n)
-                                sent += n
-                            }
-                            out.flush()
+                f.inputStream().use { ins ->
+                    if (restOffset > 0) skipFully(ins, restOffset)
+                    ds.getOutputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = ins.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            sent += n
                         }
+                        out.flush()
                     }
                 }
             } catch (e: Exception) {
@@ -757,9 +720,12 @@ class SimpleFtpServer(
                 send("550 Invalid file name.")
                 return
             }
-            val existing = findChild(t.parent, t.name)
-            val target = existing ?: t.parent.createFile("application/octet-stream", t.name)
-            if (target == null || target.isDirectory) {
+            if (FileStore.isInsideFavorite(config.root, t.parent)) {
+                send("550 Read-only: @Favorite is a virtual view.")
+                return
+            }
+            val target = FileStore.child(config.root, t.parent, t.name) ?: File(t.parent, t.name)
+            if (target.isDirectory) {
                 send("550 Cannot create file.")
                 return
             }
@@ -769,11 +735,8 @@ class SimpleFtpServer(
             }
             send("150 Ok to send data.")
             try {
-                val mode = if (append) "wa" else "w"
                 ds.getInputStream().use { input ->
-                    ctx.contentResolver.openOutputStream(target.uri, mode)?.use { out ->
-                        input.copyTo(out)
-                    }
+                    FileOutputStream(target, append).use { out -> input.copyTo(out) }
                 }
             } catch (e: Exception) {
             } finally {

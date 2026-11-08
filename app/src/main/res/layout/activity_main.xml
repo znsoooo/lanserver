@@ -256,22 +256,30 @@
                     android:paddingTop="11dp"
                     android:paddingBottom="11dp">
 
-                    <TextView
-                        android:id="@+id/tvUrl"
+                    <!-- 网址同样可能较长：横向可滑动（不显示滚动条） -->
+                    <HorizontalScrollView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text=""
-                        android:textSize="12sp"
-                        android:fontFamily="monospace"
-                        android:textColor="@color/txt2"
-                        android:singleLine="true"
-                        android:ellipsize="end" />
+                        android:scrollbars="none"
+                        android:fillViewport="true">
+
+                        <TextView
+                            android:id="@+id/tvUrl"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textSize="12sp"
+                            android:fontFamily="monospace"
+                            android:textColor="@color/txt2"
+                            android:singleLine="true" />
+                    </HorizontalScrollView>
 
                     <Button
                         android:id="@+id/btnCopyUrl"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
                         android:text="复制"
                         android:textSize="12sp"
                         android:textStyle="bold"
@@ -357,23 +365,31 @@
                     android:minHeight="44dp"
                     android:layout_marginBottom="8dp">
 
-                    <TextView
-                        android:id="@+id/tvDir"
+                    <!-- 路径可能很长：横向可滑动查看完整内容（不显示滚动条） -->
+                    <HorizontalScrollView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:gravity="start"
-                        android:text="/storage/emulated/0"
-                        android:textSize="12sp"
-                        android:fontFamily="monospace"
-                        android:textColor="@color/txt2"
-                        android:singleLine="true"
-                        android:ellipsize="end" />
+                        android:scrollbars="none"
+                        android:fillViewport="true">
+
+                        <TextView
+                            android:id="@+id/tvDir"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:gravity="start|center_vertical"
+                            android:text="/storage/emulated/0"
+                            android:textSize="12sp"
+                            android:fontFamily="monospace"
+                            android:textColor="@color/txt2"
+                            android:singleLine="true" />
+                    </HorizontalScrollView>
 
                     <Button
                         android:id="@+id/btnCopyDir"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
                         android:text="复制"
                         android:textSize="12sp"
                         android:textStyle="bold"

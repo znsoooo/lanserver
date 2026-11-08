@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 服务器需要监听网络端口 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -8,8 +9,20 @@
     <!-- 局域网通常以 Wi-Fi 方式接入，部分 ROM 需要该权限才能建立服务器 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- 直接以 java.io.File 访问共享目录（含 /storage/emulated/0 根目录） -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
     <application
         android:allowBackup="true"
+        android:requestLegacyExternalStorage="true"
         android:label="局域网服务器"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -25,6 +38,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".DirPickerActivity"
+            android:exported="false"
+            android:label="选择共享目录" />
     </application>
 
 </manifest>

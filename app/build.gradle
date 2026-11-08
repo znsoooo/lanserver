@@ -13,8 +13,8 @@ android {
         applicationId 'com.znsoooo.lanserver'
         minSdk 21
         targetSdk 34
-        versionCode 3
-        versionName '1.1'
+        versionCode 4
+        versionName '1.2'
     }
 
     buildTypes {
@@ -41,6 +41,5 @@ android {
 
 dependencies {
     implementation 'com.google.zxing:core:3.5.2'
-    implementation 'androidx.documentfile:documentfile:1.0.1'
     implementation 'androidx.cardview:cardview:1.0.0'
 }

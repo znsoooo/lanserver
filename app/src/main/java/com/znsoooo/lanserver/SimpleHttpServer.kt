@@ -1,19 +1,17 @@
 package com.znsoooo.lanserver
 
 import android.content.Context
-import androidx.documentfile.provider.DocumentFile
 import java.io.ByteArrayOutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.io.File
 import java.net.URLDecoder
 
 /**
  * 轻量 HTTP 文件服务器（HTTP/1.0，单连接串行处理）。
- * 基于 SAF 选中的 DocumentFile 根目录，支持目录浏览与文件下载。
- *
- * 目录列举已改为单次批量查询（见 DocUtils.listEntries），解决了此前逐文件
- * 跨进程查询导致的极慢问题（1200 文件曾耗时 130+ 秒）。
- * 后续仍可优化的方向：并发处理（当前每连接起一个线程）、大文件分块传输。
+ * 基于 java.io.File 的根目录（需「所有文件访问」权限），支持目录浏览、下载与上传。
+ * 列目录/读写都是本地文件系统操作；共享目录内存在收藏文件时，根目录下还会多出
+ * 虚拟的 @Favorite 目录（见 FileStore）。
  */
 class SimpleHttpServer(
     private val ctx: Context,
@@ -61,7 +59,7 @@ class SimpleHttpServer(
         val sock: Socket,
         private val firstLine: String? = null
     ) : Thread() {
-        private val root: DocumentFile get() = config.root
+        private val root: File get() = config.root
         private val showHidden: Boolean get() = config.showHidden
         private val allowWrite: Boolean get() = config.allowWrite
 
@@ -110,8 +108,12 @@ class SimpleHttpServer(
                         return
                     }
                     val body = readExact(input, contentLength)
-                    val parent = DocUtils.resolve(root, decoded) ?: root
-                    if (!parent.isDirectory) {
+                    val parent = FileStore.resolve(root, decoded) ?: root
+                    if (FileStore.isInsideFavorite(root, parent)) {
+                        send(out, 403, "text/plain; charset=utf-8", "403 Forbidden: @Favorite 目录只读")
+                        return
+                    }
+                    if (!FileStore.isDirectory(root, parent)) {
                         send(out, 400, "text/plain; charset=utf-8", "400 目标不是目录")
                         return
                     }
@@ -126,19 +128,21 @@ class SimpleHttpServer(
                     return
                 }
 
-                val file = DocUtils.resolve(root, decoded)
+                val file = FileStore.resolve(root, decoded)
                 when {
-                    file != null && file.exists() && file.isDirectory ->
+                    file != null && FileStore.exists(root, file) && FileStore.isDirectory(root, file) ->
                         send(out, 200, "text/html; charset=utf-8", buildListing(decoded, file))
-                    file != null && file.exists() -> {
-                        // 存在的文件：直接下载
-                        val mime = DocUtils.mimeOf(file.name ?: "")
+                    file != null && FileStore.exists(root, file) -> {
+                        // 存在的文件：直接下载。@Favorite 里列出的文件是虚拟路径，
+                        // 必须映射回真实路径再读，否则长度 0、读流抛异常。
+                        val real = FileStore.realFile(root, file)
+                        val mime = FileStore.mimeOf(real.name ?: "")
                         val header = "HTTP/1.1 200 OK\r\n" +
                                 "Content-Type: $mime\r\n" +
-                                "Content-Length: ${file.length()}\r\n" +
+                                "Content-Length: ${real.length()}\r\n" +
                                 "Connection: close\r\n\r\n"
                         out.write(header.toByteArray(Charsets.UTF_8))
-                        ctx.contentResolver.openInputStream(file.uri)?.use { it.copyTo(out) }
+                        real.inputStream().use { it.copyTo(out) }
                     }
                     else -> {
                         // 路径不存在：逐级向上找最近的、真实存在的目录并跳转
@@ -188,7 +192,7 @@ class SimpleHttpServer(
         }
 
         /** 解析 multipart/form-data，把文件保存到 parent 目录。 */
-        private fun handleUpload(body: ByteArray, boundary: String, parent: DocumentFile): Boolean {
+        private fun handleUpload(body: ByteArray, boundary: String, parent: File): Boolean {
             val dashBoundary = "--$boundary".toByteArray(Charsets.UTF_8)
             var pos = 0
             var uploaded = false
@@ -217,10 +221,9 @@ class SimpleHttpServer(
                 if (filename != null && filename.isNotBlank()) {
                     val data = body.copyOfRange(p, dataEnd)
                     val safeName = filename.replace("/", "_")
-                    val existing = parent.findFile(safeName)
-                    val target = existing ?: parent.createFile("application/octet-stream", safeName)
-                    if (target != null && target.isFile) {
-                        ctx.contentResolver.openOutputStream(target.uri)?.use { it.write(data) }
+                    val target = File(parent, safeName)
+                    if (!target.isDirectory) {
+                        target.outputStream().use { it.write(data) }
                         uploaded = true
                     }
                 }
@@ -262,8 +265,8 @@ class SimpleHttpServer(
             var cur = path.trimEnd('/')
             if (cur.isEmpty()) cur = "/"
             while (true) {
-                val f = DocUtils.resolve(root, cur)
-                if (f != null && f.exists() && f.isDirectory) return cur
+                val f = FileStore.resolve(root, cur)
+                if (f != null && FileStore.exists(root, f) && FileStore.isDirectory(root, f)) return cur
                 if (cur == "/") return "/"
                 val slash = cur.lastIndexOf('/')
                 cur = if (slash <= 0) "/" else cur.substring(0, slash)
@@ -271,7 +274,7 @@ class SimpleHttpServer(
         }
 
         private fun sendRedirect(out: java.io.OutputStream, location: String) {
-            val body = "<html><body>上传成功，<a href=\"${escapeHtml(location)}\">返回</a></body></html>"
+            val body = "<html><body>正在返回，<a href=\"${escapeHtml(location)}\">点击这里</a></body></html>"
             val bytes = body.toByteArray(Charsets.UTF_8)
             val header = "HTTP/1.1 302 Found\r\n" +
                     "Location: $location\r\n" +
@@ -284,7 +287,12 @@ class SimpleHttpServer(
         }
 
         private fun send(out: java.io.OutputStream, code: Int, mime: String, body: String) {
-            val reason = if (code == 404) "Not Found" else "OK"
+            val reason = when (code) {
+                400 -> "Bad Request"
+                403 -> "Forbidden"
+                404 -> "Not Found"
+                else -> "OK"
+            }
             val bytes = body.toByteArray(Charsets.UTF_8)
             val header = "HTTP/1.1 $code $reason\r\n" +
                     "Content-Type: $mime\r\n" +
@@ -295,7 +303,7 @@ class SimpleHttpServer(
             out.flush()
         }
 
-        private fun buildListing(curPath: String, dir: DocumentFile): String {
+        private fun buildListing(curPath: String, dir: File): String {
             val sb = StringBuilder()
             sb.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
             sb.append("<title>局域网服务器</title>")
@@ -335,19 +343,19 @@ class SimpleHttpServer(
             // 在目录 URL 没有结尾斜杠时把子文件夹一级丢掉（中文/英文子目录都受影响）。
             val base = if (curPath == "/") "/" else "$curPath/"
             // 一次批量查询取回全部子项的名称/类型/大小，避免对每个文件逐一触发跨进程查询
-            for (e in DocUtils.listEntries(ctx, root, dir, showHidden)) {
+            for (e in FileStore.list(ctx, root, dir, showHidden)) {
                 val name = e.name
                 val enc = java.net.URLEncoder.encode(name, "UTF-8")
                 val link = "$base$enc"
                 // 文件显示大小并右对齐；文件夹显示内部项数（是否统计隐藏与 UI 同步）
-                val sizeText = if (e.isDirectory) {
-                    val n = DocUtils.countChildren(ctx, root, e.uri, showHidden)
+                val sizeText = if (e.isDir) {
+                    val n = FileStore.count(ctx, root, e.file, showHidden)
                     "<span class=\"size\">${n} 项</span>"
                 } else {
                     "<span class=\"size\">${formatSize(e.size)}</span>"
                 }
                 sb.append("<li><a href=\"").append(link).append("\">")
-                    .append(escapeHtml(name)).append(if (e.isDirectory) "/" else "").append("</a>")
+                    .append(escapeHtml(name)).append(if (e.isDir) "/" else "").append("</a>")
                     .append(sizeText).append("</li>")
             }
             sb.append("</ul></div></body></html>")

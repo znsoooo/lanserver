@@ -1,6 +1,6 @@
 package com.znsoooo.lanserver
 
-import androidx.documentfile.provider.DocumentFile
+import java.io.File
 
 /**
  * 服务运行期配置，HTTP 与 FTP **共用同一份**。
@@ -12,7 +12,7 @@ import androidx.documentfile.provider.DocumentFile
  * 合并为单端口后，这套配置同时作用于 HTTP 与 FTP，两条协议路径的取值保持一致。
  */
 class ServerConfig(
-    @Volatile var root: DocumentFile,
+    @Volatile var root: File,
     @Volatile var showHidden: Boolean,
     @Volatile var allowWrite: Boolean
 )
